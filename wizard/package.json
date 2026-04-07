@@ -1,0 +1,9 @@
+{
+  "name": "wizard",
+  "private": true,
+  "description": "Tinybird env gate and setup wizard for Ghost 6 Docker stacks",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
