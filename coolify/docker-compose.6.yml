@@ -6,7 +6,7 @@
 services:
   wizard:
     build:
-      context: ..
+      context: .
       dockerfile: wizard/Dockerfile
       args:
         GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
