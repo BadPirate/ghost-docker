@@ -3,8 +3,6 @@ services:
     image: 'ghost:5'
     volumes:
       - 'ghost-content-data:/var/lib/ghost/content'
-    ports:
-      - '2368:2368'
     environment:
       - SERVICE_URL_GHOST_2368
       - url=$SERVICE_URL_GHOST
@@ -50,6 +48,3 @@ services:
       interval: 5s
       timeout: 20s
       retries: 10
-volumes:
-  ghost-content-data:
-  ghost-mysql-data:
