@@ -114,16 +114,24 @@ services:
     image: mysql:8.0.44@sha256:f37951fc3753a6a22d6c7bf6978c5e5fefcf6f31814d98c582524f98eae52b21
     environment:
       MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
-      SERVICE_USER_MYSQL: ${SERVICE_USER_MYSQL}
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -e
-        mysql -h mysql -uroot -p"$$MYSQL_ROOT_PASSWORD" -e "
-          CREATE DATABASE IF NOT EXISTS \`activitypub\`;
-          GRANT ALL ON \`activitypub\`.* TO '$$SERVICE_USER_MYSQL'@'%';
-          FLUSH PRIVILEGES;
-        "
+        for i in $$(seq 1 60); do
+          if mysqladmin ping -h mysql -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent 2>/dev/null; then
+            break
+          fi
+          if [ "$$i" -eq 60 ]; then echo "activitypub-db-init: MySQL not reachable at mysql:3306"; exit 1; fi
+          sleep 1
+        done
+        printf 'CREATE DATABASE IF NOT EXISTS `activitypub`;
+        CREATE USER IF NOT EXISTS '\''%s'\''@'\''%s'\'' IDENTIFIED BY '\''%s'\'';
+        GRANT ALL ON `activitypub`.* TO '\''%s'\''@'\''%s'\'';
+        FLUSH PRIVILEGES;
+        ' "$$MYSQL_USER" "%" "$$MYSQL_PASSWORD" "$$MYSQL_USER" "%" | mysql -h mysql -uroot -p"$$MYSQL_ROOT_PASSWORD"
     depends_on:
       mysql:
         condition: service_healthy
