@@ -24,7 +24,7 @@ services:
       SERVICE_URL_GHOST_2368: ${SERVICE_URL_GHOST_2368}
       url: ${SERVICE_URL_GHOST}
       NODE_ENV: production
-      admin__url: ${ADMIN_DOMAIN:-SERVICE_URL_GHOST}
+      admin__url: ${ADMIN_DOMAIN:-${SERVICE_URL_GHOST}}
       database__client: mysql
       database__connection__host: mysql
       database__connection__user: ${SERVICE_USER_MYSQL}
