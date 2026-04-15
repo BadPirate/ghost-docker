@@ -71,7 +71,8 @@ services:
       MYSQL_MULTIPLE_DATABASES: activitypub
     volumes:
       - ${MYSQL_DATA_LOCATION:-./data/mysql}:/var/lib/mysql
-      - ./mysql-init:/docker-entrypoint-initdb.d
+      # Mount only this script (not the whole mysql-init dir) so a mistaken host path cannot inject junk into initdb.d
+      - ./mysql-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh:ro
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s

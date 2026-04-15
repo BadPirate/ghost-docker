@@ -3,6 +3,11 @@
 # - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
 # - activitypub-db-init: idempotent CREATE DATABASE / user / grants via 127.0.0.1 (network_mode: service:mysql) so existing volumes get activitypub without relying on initdb.d alone.
 # - activitypub-migrate: applies ActivityPub DB migrations after the DB exists.
+#
+# Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
+#   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
+#   entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
+# Remove those lines in the application compose / overrides, redeploy, then rm -rf …/mysql-init/docker-entrypoint-shim.sh on the host if it exists.
 services:
   wizard:
     build:
@@ -62,7 +67,7 @@ services:
       MYSQL_MULTIPLE_DATABASES: activitypub
     volumes:
       - 'ghost-mysql-data:/var/lib/mysql'
-      - ../mysql-init:/docker-entrypoint-initdb.d
+      - ../mysql-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh:ro
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
