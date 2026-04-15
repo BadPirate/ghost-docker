@@ -1,8 +1,8 @@
 ---
 # Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
 # - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
-# - mysql uses docker-entrypoint-shim.sh so `activitypub` is created on every mysqld start (--init-file), not only on first empty volume (initdb.d).
-# - activitypub-migrate: applies ActivityPub DB migrations to the activitypub MySQL database before the app starts.
+# - activitypub-db-init: idempotent CREATE DATABASE / user / grants via 127.0.0.1 (network_mode: service:mysql) so existing volumes get activitypub without relying on initdb.d alone.
+# - activitypub-migrate: applies ActivityPub DB migrations after the DB exists.
 services:
   wizard:
     build:
@@ -62,9 +62,7 @@ services:
       MYSQL_MULTIPLE_DATABASES: activitypub
     volumes:
       - 'ghost-mysql-data:/var/lib/mysql'
-      - ./mysql-init:/docker-entrypoint-initdb.d
-      - ./mysql-init/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh:ro
-    entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
+      - ../mysql-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
@@ -112,6 +110,21 @@ services:
       wizard:
         condition: service_completed_successfully
 
+  activitypub-db-init:
+    image: mysql:8
+    network_mode: service:mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+    volumes:
+      - ../mysql-init/ensure-activitypub.sh:/ensure-activitypub.sh:ro
+    entrypoint: ["/bin/bash", "/ensure-activitypub.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
     environment:
@@ -119,6 +132,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      activitypub-db-init:
+        condition: service_completed_successfully
     restart: no
 
 volumes:

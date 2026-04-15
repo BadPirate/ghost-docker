@@ -72,8 +72,6 @@ services:
     volumes:
       - ${MYSQL_DATA_LOCATION:-./data/mysql}:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
-      - ./mysql-init/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh:ro
-    entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
@@ -186,6 +184,22 @@ services:
       - ghost_network
     tty: true
 
+  activitypub-db-init:
+    image: mysql:8.0.44@sha256:f37951fc3753a6a22d6c7bf6978c5e5fefcf6f31814d98c582524f98eae52b21
+    network_mode: service:db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DATABASE_ROOT_PASSWORD:?DATABASE_ROOT_PASSWORD environment variable is required}
+      MYSQL_USER: ${DATABASE_USER:-ghost}
+      MYSQL_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD environment variable is required}
+    volumes:
+      - ./mysql-init/ensure-activitypub.sh:/ensure-activitypub.sh:ro
+    entrypoint: ["/bin/bash", "/ensure-activitypub.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: [activitypub]
+    restart: "no"
+
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.2.2@sha256:2af8a0726ac4362cdcab59c308ed612140478d43011ec8d3475bb2634b96d108
     environment:
@@ -195,6 +209,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      activitypub-db-init:
+        condition: service_completed_successfully
     profiles: [activitypub]
     restart: no
 
