@@ -17,9 +17,14 @@ if ! mysqladmin ping -h 127.0.0.1 -uroot -p"${MYSQL_ROOT_PASSWORD}" --silent 2>/
   exit 1
 fi
 
+# CREATE USER IF NOT EXISTS does not refresh the password when the user already exists (e.g. volume from an
+# older deploy or different MYSQL_PASSWORD). ALTER USER keeps Coolify env and MySQL in sync.
 printf 'CREATE DATABASE IF NOT EXISTS `activitypub`;
 CREATE USER IF NOT EXISTS '\''%s'\''@'\''%s'\'' IDENTIFIED BY '\''%s'\'';
+ALTER USER '\''%s'\''@'\''%s'\'' IDENTIFIED BY '\''%s'\'';
 GRANT ALL ON `activitypub`.* TO '\''%s'\''@'\''%s'\'';
 FLUSH PRIVILEGES;
-' "${MYSQL_USER}" "%" "${MYSQL_PASSWORD}" "${MYSQL_USER}" "%" \
+' "${MYSQL_USER}" "%" "${MYSQL_PASSWORD}" \
+  "${MYSQL_USER}" "%" "${MYSQL_PASSWORD}" \
+  "${MYSQL_USER}" "%" \
   | mysql -h 127.0.0.1 -uroot -p"${MYSQL_ROOT_PASSWORD}"
