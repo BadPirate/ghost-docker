@@ -1,7 +1,7 @@
 ---
 # Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
 # - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
-# - activitypub-db-init: idempotent CREATE+GRANT for `activitypub` (initdb.d only runs on empty volume; reused Ghost 5 volumes skip it).
+# - mysql uses docker-entrypoint-shim.sh so `activitypub` is created on every mysqld start (--init-file), not only on first empty volume (initdb.d).
 # - activitypub-migrate: applies ActivityPub DB migrations to the activitypub MySQL database before the app starts.
 services:
   wizard:
@@ -63,6 +63,8 @@ services:
     volumes:
       - 'ghost-mysql-data:/var/lib/mysql'
       - ./mysql-init:/docker-entrypoint-initdb.d
+      - ./mysql-init/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh:ro
+    entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
@@ -110,33 +112,6 @@ services:
       wizard:
         condition: service_completed_successfully
 
-  activitypub-db-init:
-    image: mysql:8.0.44@sha256:f37951fc3753a6a22d6c7bf6978c5e5fefcf6f31814d98c582524f98eae52b21
-    environment:
-      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
-      MYSQL_USER: ${SERVICE_USER_MYSQL}
-      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
-    entrypoint: ["/bin/bash", "-c"]
-    command:
-      - |
-        set -e
-        for i in $$(seq 1 60); do
-          if mysqladmin ping -h mysql -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent 2>/dev/null; then
-            break
-          fi
-          if [ "$$i" -eq 60 ]; then echo "activitypub-db-init: MySQL not reachable at mysql:3306"; exit 1; fi
-          sleep 1
-        done
-        printf 'CREATE DATABASE IF NOT EXISTS `activitypub`;
-        CREATE USER IF NOT EXISTS '\''%s'\''@'\''%s'\'' IDENTIFIED BY '\''%s'\'';
-        GRANT ALL ON `activitypub`.* TO '\''%s'\''@'\''%s'\'';
-        FLUSH PRIVILEGES;
-        ' "$$MYSQL_USER" "%" "$$MYSQL_PASSWORD" "$$MYSQL_USER" "%" | mysql -h mysql -uroot -p"$$MYSQL_ROOT_PASSWORD"
-    depends_on:
-      mysql:
-        condition: service_healthy
-    restart: "no"
-
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
     environment:
@@ -144,8 +119,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      activitypub-db-init:
-        condition: service_completed_successfully
     restart: no
 
 volumes:

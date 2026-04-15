@@ -72,6 +72,8 @@ services:
     volumes:
       - ${MYSQL_DATA_LOCATION:-./data/mysql}:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
+      - ./mysql-init/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh:ro
+    entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
