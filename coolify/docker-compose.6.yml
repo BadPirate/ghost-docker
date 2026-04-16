@@ -1,0 +1,151 @@
+---
+# Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
+# Build context for wizard + mysql/Dockerfile is the repo root (Coolify uses --project-directory to the clone).
+# - mysql: stock mysql:8 image (no custom server image).
+# - mysql-app-init: small built sidecar (mysql/Dockerfile) runs mysql-app-bootstrap.sh via network_mode: service:mysql after mysqld is healthy.
+# - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
+# - activitypub-migrate: applies ActivityPub DB migrations after mysql-app-init completes.
+#
+# Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
+#   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
+#   entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
+# Remove those lines in the application compose / overrides, redeploy, then rm -rf …/mysql-init/docker-entrypoint-shim.sh on the host if it exists.
+services:
+  wizard:
+    build:
+      context: .
+      dockerfile: wizard/Dockerfile
+      args:
+        GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
+    environment:
+      SERVICE_URL_WIZARD_3989: ${SERVICE_URL_WIZARD_3989}
+      url: ${SERVICE_URL_WIZARD}
+    expose:
+      - "3989"
+    volumes:
+      - tinybird_home:/home/tinybird
+    restart: "no"
+  ghost:
+    image: ghost:${GHOST_VERSION:-6-alpine}
+    environment:
+      SERVICE_URL_GHOST_2368: ${SERVICE_URL_GHOST_2368}
+      url: ${SERVICE_URL_GHOST}
+      NODE_ENV: production
+      admin__url: ${SERVICE_URL_GHOST}
+      database__client: mysql
+      database__connection__host: mysql
+      database__connection__user: ${SERVICE_USER_MYSQL}
+      database__connection__password: ${SERVICE_PASSWORD_MYSQL}
+      database__connection__database: ${MYSQL_DATABASE-ghost}
+      mail__options__auth__pass: ${MAIL_OPTIONS_AUTH_PASS}
+      mail__options__auth__user: ${MAIL_OPTIONS_AUTH_USER}
+      mail__options__secure: ${MAIL_OPTIONS_SECURE:-true}
+      mail__options__port: ${MAIL_OPTIONS_PORT:-465}
+      mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
+      mail__options__host: ${MAIL_OPTIONS_HOST}
+      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT}
+      tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
+      tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
+      tinybird__tracker__datasource: analytics_events
+      tinybird__stats__endpoint: ${TINYBIRD_API_URL:-https://api.tinybird.co}
+    volumes:
+      - 'ghost-content-data:/var/lib/ghost/content'
+    depends_on:
+      mysql:
+        condition: service_healthy
+      wizard:
+        condition: service_completed_successfully
+      activitypub:
+        condition: service_started
+        required: false
+  mysql:
+    image: mysql:8
+    restart: always
+    environment:
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
+      MYSQL_MULTIPLE_DATABASES: activitypub
+    volumes:
+      - 'ghost-mysql-data:/var/lib/mysql'
+    healthcheck:
+      test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
+      interval: 1s
+      start_period: 30s
+      start_interval: 5s
+      timeout: 20s
+      retries: 10
+  traffic-analytics:
+    image: ghost/traffic-analytics:1.0.154@sha256:6a77d76a98558e0355160ef5eea4f465a1545441d5690e9fa01697b66b0505ef
+    restart: always
+    depends_on:
+      wizard:
+        condition: service_completed_successfully
+    expose:
+      - "3000"
+    volumes:
+      - traffic_analytics_data:/data
+    environment:
+      NODE_ENV: production
+      PROXY_TARGET: ${TINYBIRD_API_URL:-https://api.tinybird.co}/v0/events
+      SALT_STORE_TYPE: ${SALT_STORE_TYPE:-file}
+      SALT_STORE_FILE_PATH: /data/salts.json
+      TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
+      LOG_LEVEL: debug
+  activitypub:
+    image: ghcr.io/tryghost/activitypub:1.1.0@sha256:39c212fe23603b182d68e67d555c6b9b04b1e57459dfc0bef26d6e4980eb04d1
+    restart: always
+    expose:
+      - "8080"
+    volumes:
+      - 'ghost-content-data:/opt/activitypub/content'
+    environment:
+      NODE_ENV: production
+      MYSQL_HOST: mysql
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+      MYSQL_DATABASE: activitypub
+      LOCAL_STORAGE_PATH: /opt/activitypub/content/images/activitypub
+      LOCAL_STORAGE_HOSTING_URL: https://${SERVICE_URL_GHOST}/content/images/activitypub
+    depends_on:
+      mysql:
+        condition: service_healthy
+      activitypub-migrate:
+        condition: service_completed_successfully
+      wizard:
+        condition: service_completed_successfully
+
+  mysql-app-init:
+    build:
+      context: .
+      dockerfile: mysql/Dockerfile
+    network_mode: service:mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+      MYSQL_MULTIPLE_DATABASES: activitypub
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  activitypub-migrate:
+    image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
+    environment:
+      MYSQL_DB: mysql://${SERVICE_USER_MYSQL}:${SERVICE_PASSWORD_MYSQL}@tcp(mysql:3306)/activitypub
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-app-init:
+        condition: service_completed_successfully
+    restart: no
+
+volumes:
+  caddy_data:
+  caddy_config:
+  ghost-content-data:
+  ghost-mysql-data:
+  tinybird_home:
+  traffic_analytics_data:

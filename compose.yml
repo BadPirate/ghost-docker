@@ -71,7 +71,6 @@ services:
       MYSQL_MULTIPLE_DATABASES: activitypub
     volumes:
       - ${MYSQL_DATA_LOCATION:-./data/mysql}:/var/lib/mysql
-      - ./mysql-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: mysqladmin ping -p$$MYSQL_ROOT_PASSWORD -h 127.0.0.1
       interval: 1s
@@ -184,6 +183,22 @@ services:
       - ghost_network
     tty: true
 
+  mysql-app-init:
+    build:
+      context: .
+      dockerfile: mysql/Dockerfile
+    network_mode: service:db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DATABASE_ROOT_PASSWORD:?DATABASE_ROOT_PASSWORD environment variable is required}
+      MYSQL_USER: ${DATABASE_USER:-ghost}
+      MYSQL_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD environment variable is required}
+      MYSQL_MULTIPLE_DATABASES: activitypub
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: [activitypub]
+    restart: "no"
+
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.2.2@sha256:2af8a0726ac4362cdcab59c308ed612140478d43011ec8d3475bb2634b96d108
     environment:
@@ -193,6 +208,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      mysql-app-init:
+        condition: service_completed_successfully
     profiles: [activitypub]
     restart: no
 
