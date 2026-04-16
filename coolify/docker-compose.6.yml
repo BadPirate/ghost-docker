@@ -43,7 +43,7 @@ services:
       mail__options__port: ${MAIL_OPTIONS_PORT:-465}
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
-      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT}
+      tinybird__tracker__endpoint: https://${SERVICE_URL_ANALYTICS}/api/v1/page_hit
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
       tinybird__tracker__datasource: analytics_events
@@ -87,6 +87,8 @@ services:
     volumes:
       - traffic_analytics_data:/data
     environment:
+      SERVICE_URL_ANALYTICS_3000: ${SERVICE_URL_ANALYTICS_3000}
+      url: ${SERVICE_URL_ANALYTICS}
       NODE_ENV: production
       PROXY_TARGET: ${TINYBIRD_API_URL:-https://api.tinybird.co}/v0/events
       SALT_STORE_TYPE: ${SALT_STORE_TYPE:-file}
