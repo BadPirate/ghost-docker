@@ -93,6 +93,18 @@ services:
         condition: service_completed_successfully
     expose:
       - "3000"
+    # Traefik: strip `/.ghost/analytics` (rewrites path to the backend, same container :3000). Label/router names include ${COOLIFY_RESOURCE_UUID}.
+    # Set TRAEFIK_ANALYTICS_RULE in Coolify to a full v2 match if you need Host(…), e.g. Host(`godutch.us`) && PathPrefix(`/.ghost/analytics`)
+    labels:
+      - "traefik.http.middlewares.ga-stripprefix-${COOLIFY_RESOURCE_UUID:-local}.stripprefix.prefixes=/.ghost/analytics"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.entrypoints=https,http"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.rule=${TRAEFIK_ANALYTICS_RULE:-PathPrefix(`/.ghost/analytics`)}"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.middlewares=ga-stripprefix-${COOLIFY_RESOURCE_UUID:-local}"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.priority=100"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.service=ga-svc-${COOLIFY_RESOURCE_UUID:-local}"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.tls=true"
+      - "traefik.http.routers.ga-ghost-analytics-${COOLIFY_RESOURCE_UUID:-local}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ga-svc-${COOLIFY_RESOURCE_UUID:-local}.loadbalancer.server.port=3000"
     volumes:
       - traffic_analytics_data:/data
     environment:

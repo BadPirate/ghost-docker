@@ -8,7 +8,7 @@ Set **`MAIL_FROM`** to a valid transactional From line, e.g. `"'Your Site' <nore
 
 ## Traffic analytics (same-origin)
 
-Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). Route `/.ghost/analytics` on that host to the **traffic-analytics** service (port **3000**) in Traefik/Coolify and **strip** the `/.ghost/analytics` prefix so the container sees `/api/v1/page_hit`, matching `caddy/snippets/TrafficAnalytics`.
+Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). The **`traffic-analytics`** service in `docker-compose.6.yml` includes Traefik `labels` that **strip** the `/.ghost/analytics` prefix and route to port **3000** (**`stripPrefix`**, not **`redirectRegex`** / HTTP redirects to the client).
 
 ## Migration
 
