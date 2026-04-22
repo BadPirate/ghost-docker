@@ -6,6 +6,10 @@
 # - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
 # - activitypub-migrate: applies ActivityPub DB migrations after mysql-app-init completes.
 #
+# Analytics (same-origin / CORS): set Ghost’s tracker to ${SERVICE_URL_GHOST}/.ghost/analytics/… so the browser posts to
+# the same host as the site. Route https://<ghost-host>/.ghost/analytics (Traefik/Coolify) to traffic-analytics:3000 and
+# strip the /.ghost/analytics prefix so the service receives /api/v1/page_hit (see caddy/snippets/TrafficAnalytics).
+#
 # Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
 #   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
 #   entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
@@ -43,10 +47,13 @@ services:
       mail__options__port: ${MAIL_OPTIONS_PORT:-465}
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
-      tinybird__tracker__endpoint: https://${SERVICE_URL_ANALYTICS}/api/v1/page_hit
+      # Same origin as `url` — required for browser CORS. Proxy must rewrite /.ghost/analytics/* → /api/* on traffic-analytics:3000
+      tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit
+      labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
       tinybird__tracker__datasource: analytics_events
+      # Admin/stats read from Tinybird API (not via traffic-analytics)
       tinybird__stats__endpoint: ${TINYBIRD_API_URL:-https://api.tinybird.co}
     volumes:
       - 'ghost-content-data:/var/lib/ghost/content'
@@ -87,9 +94,9 @@ services:
     volumes:
       - traffic_analytics_data:/data
     environment:
-      SERVICE_URL_ANALYTICS_3000: ${SERVICE_URL_ANALYTICS_3000}
-      url: ${SERVICE_URL_ANALYTICS}
       NODE_ENV: production
+      # Behind Traefik/Coolify; client IP from X-Forwarded-For (see TryGhost/TrafficAnalytics)
+      TRUST_PROXY: "true"
       PROXY_TARGET: ${TINYBIRD_API_URL:-https://api.tinybird.co}/v0/events
       SALT_STORE_TYPE: ${SALT_STORE_TYPE:-file}
       SALT_STORE_FILE_PATH: /data/salts.json
