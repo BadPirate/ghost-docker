@@ -15,7 +15,7 @@ The **`wizard`** service is the **only** service that needs a public Coolify dom
   - `/.ghost/analytics/*` → `http://traffic-analytics:3000/*` (prefix stripped, same as `caddy/snippets/TrafficAnalytics`)
   - everything else → `http://ghost:2368`
 
-Because it runs on the same origin as the blog, Ghost’s `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` posts stay same-origin (no CORS, no Traefik labels, no dynamic-config file). `ghost` and `traffic-analytics` do not need public Coolify FQDNs.
+Because it runs on the same origin as the blog, Ghost’s `tinybird__tracker__endpoint: ${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit` posts stay same-origin (no CORS, no Traefik labels, no dynamic-config file). `ghost` and `traffic-analytics` do not need public Coolify FQDNs.
 
 Override upstreams with `PROXY_GHOST_UPSTREAM` / `PROXY_ANALYTICS_UPSTREAM` if the Docker DNS names differ. Set `WIZARD_SKIP=1` to force proxy mode (e.g. if you do not want analytics at all).
 

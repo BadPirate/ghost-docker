@@ -35,7 +35,6 @@ services:
       TINYBIRD_WORKSPACE_ID: ${TINYBIRD_WORKSPACE_ID:-}
       TINYBIRD_ADMIN_TOKEN: ${TINYBIRD_ADMIN_TOKEN:-}
       TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
-      TINYBIRD_TRACKER_ENDPOINT: ${TINYBIRD_TRACKER_ENDPOINT:-}
       WIZARD_SKIP: ${WIZARD_SKIP:-}
     expose:
       - "3989"
@@ -68,8 +67,8 @@ services:
       mail__options__port: ${MAIL_OPTIONS_PORT:-465}
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
-      # Same origin as `url` — required for browser CORS. Proxy must rewrite /.ghost/analytics/* → /api/* on traffic-analytics:3000
-      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT:-${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit}
+      # Same-origin (browser CORS). Wizard strips /.ghost/analytics and forwards to traffic-analytics:3000/api/v1/page_hit.
+      tinybird__tracker__endpoint: ${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit
       labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}

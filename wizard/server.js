@@ -21,12 +21,16 @@ const GHOST_UPSTREAM = (process.env.PROXY_GHOST_UPSTREAM || 'http://ghost:2368')
 const ANALYTICS_UPSTREAM = (process.env.PROXY_ANALYTICS_UPSTREAM || 'http://traffic-analytics:3000').replace(/\/$/, '');
 const ANALYTICS_PREFIX = '/.ghost/analytics';
 
+// NOTE: TINYBIRD_TRACKER_ENDPOINT is NOT in this list — Ghost's tracker endpoint is
+// hardcoded in coolify/docker-compose.6.yml to `${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit`
+// (same-origin, wizard strips the prefix and forwards to traffic-analytics). The browser
+// posts directly to traffic-analytics via the wizard proxy; Tinybird's own `/v0/events`
+// endpoint is never contacted from the client, so we don't need to surface that URL.
 const TINYB_ENV_KEYS = [
   'TINYBIRD_API_URL',
   'TINYBIRD_WORKSPACE_ID',
   'TINYBIRD_ADMIN_TOKEN',
   'TINYBIRD_TRACKER_TOKEN',
-  'TINYBIRD_TRACKER_ENDPOINT',
 ];
 
 function nonEmpty(v) {
@@ -396,16 +400,9 @@ async function lookupEnvFromAdminToken(adminToken) {
     TINYBIRD_WORKSPACE_ID: workspaceId,
     TINYBIRD_ADMIN_TOKEN: admin,
     TINYBIRD_TRACKER_TOKEN: tracker || '',
-    TINYBIRD_TRACKER_ENDPOINT: trackerEndpointFromApiUrl(apiBase),
     TINYBIRD_LOOKUP_INCOMPLETE: incomplete,
     lookupHint,
   };
-}
-
-function trackerEndpointFromApiUrl(apiUrl) {
-  if (!apiUrl || typeof apiUrl !== 'string') return '';
-  const u = apiUrl.replace(/\/$/, '');
-  return `${u}/v0/events`;
 }
 
 function parseEnvLines(text) {
@@ -442,10 +439,7 @@ async function fetchEnvFromTinybird() {
   if (stderr && stderr.trim()) {
     console.error('get-tokens stderr:', stderr);
   }
-  const vars = parseEnvLines(stdout);
-  const apiUrl = vars.TINYBIRD_API_URL || '';
-  vars.TINYBIRD_TRACKER_ENDPOINT = trackerEndpointFromApiUrl(apiUrl);
-  return vars;
+  return parseEnvLines(stdout);
 }
 
 async function deployWithUiToken(apiUrl, adminToken) {
@@ -479,13 +473,11 @@ function formatTinybirdEnvBlock(env) {
   const w = env.TINYBIRD_WORKSPACE_ID || '';
   const adm = env.TINYBIRD_ADMIN_TOKEN || '';
   const tr = env.TINYBIRD_TRACKER_TOKEN || '';
-  const ep = env.TINYBIRD_TRACKER_ENDPOINT || trackerEndpointFromApiUrl(a);
   return [
     `TINYBIRD_API_URL=${a}`,
     `TINYBIRD_WORKSPACE_ID=${w}`,
     `TINYBIRD_ADMIN_TOKEN=${adm}`,
     `TINYBIRD_TRACKER_TOKEN=${tr}`,
-    `TINYBIRD_TRACKER_ENDPOINT=${ep}`,
   ].join('\n');
 }
 
@@ -624,7 +616,6 @@ wizardRouter.post('/api/tinybird/generate', async (req, res) => {
     TINYBIRD_WORKSPACE_ID: out.env.TINYBIRD_WORKSPACE_ID,
     TINYBIRD_ADMIN_TOKEN: out.env.TINYBIRD_ADMIN_TOKEN,
     TINYBIRD_TRACKER_TOKEN: out.env.TINYBIRD_TRACKER_TOKEN,
-    TINYBIRD_TRACKER_ENDPOINT: out.env.TINYBIRD_TRACKER_ENDPOINT,
   });
 });
 
@@ -756,7 +747,7 @@ function wizardPage() {
 </head>
 <body>
   <h1>Setup Tinybird</h1>
-  <p class="lede">Your stack needs <code>TINYBIRD_API_URL</code>, <code>TINYBIRD_WORKSPACE_ID</code>, <code>TINYBIRD_ADMIN_TOKEN</code>, <code>TINYBIRD_TRACKER_TOKEN</code>, and <code>TINYBIRD_TRACKER_ENDPOINT</code>. Those values are not set yet, so this page will gather them. Open <a href="https://cloud.tinybird.co" target="_blank" rel="noopener">Tinybird Cloud</a>, create an account or sign in, then open the <strong>Tokens</strong> page and paste your <strong>Workspace admin token</strong> below. Click <strong>Generate</strong>—we will resolve your API URL and tokens, publish Ghost’s analytics schema if needed, then show variables you can copy into your deployment environment.</p>
+  <p class="lede">Your stack needs <code>TINYBIRD_API_URL</code>, <code>TINYBIRD_WORKSPACE_ID</code>, <code>TINYBIRD_ADMIN_TOKEN</code>, and <code>TINYBIRD_TRACKER_TOKEN</code>. Those values are not set yet, so this page will gather them. Open <a href="https://cloud.tinybird.co" target="_blank" rel="noopener">Tinybird Cloud</a>, create an account or sign in, then open the <strong>Tokens</strong> page and paste your <strong>Workspace admin token</strong> below. Click <strong>Generate</strong>—we will resolve your API URL and tokens, publish Ghost’s analytics schema if needed, then show variables you can copy into your deployment environment.</p>
 
   <label for="adminToken">Workspace admin token</label>
   <input type="password" id="adminToken" name="adminToken" autocomplete="off" placeholder="p.eyJ…">
