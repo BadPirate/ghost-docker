@@ -8,7 +8,9 @@ Set **`MAIL_FROM`** to a valid transactional From line, e.g. `"'Your Site' <nore
 
 ## Traffic analytics (same-origin)
 
-Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). The **`traffic-analytics`** service in `docker-compose.6.yml` includes Traefik `labels` that **strip** the `/.ghost/analytics` prefix and route to port **3000** (**`stripPrefix`**, not **`redirectRegex`** / HTTP redirects to the client).
+Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). The proxy must **strip** the `/.ghost/analytics` prefix and forward to **`traffic-analytics:3000`** (same as `caddy/snippets/TrafficAnalytics` — **`stripPrefix`**, not a client redirect to the public analytics host).
+
+**Traefik (Coolify):** compose no longer includes Traefik labels for this. Use a **file provider**; see `traefik-ghost-analytics.godutch.dynamic.yaml` (godutch.us → internal traffic-analytics). Mount it in your Traefik static config, fix `entryPoints` and the load-balancer `url` to match your network (often `http://traffic-analytics:3000` from Traefik on the app network).
 
 ## Migration
 
