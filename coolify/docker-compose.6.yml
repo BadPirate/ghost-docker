@@ -1,18 +1,13 @@
 ---
-# Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate + wizard (front-door proxy).
-# Build context for wizard + mysql/Dockerfile is the repo root (Coolify uses --project-directory to the clone).
-# - wizard: the only publicly-exposed service. When TINYBIRD_* env vars are unset it serves a setup UI on every
-#   path; once they are set, it reverse-proxies `/.ghost/analytics/*` → traffic-analytics:3000 (prefix stripped)
-#   and everything else → ghost:2368. Same-origin means no CORS/Traefik tricks. In Coolify, point the site FQDN
+# Stack: wizard (front door) + Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
+# Build context for wizard is the repo root (Coolify uses --project-directory to the clone).
+# - wizard: the only publicly-exposed service. Absorbs the old mysql-app-init (app user + GRANTs + multiple DBs).
+#   Healthy only once DB bootstrap + TINYBIRD_* setup are both done; other services gate on that via depends_on.
+#   Until TINYBIRD_* is set, serves a setup UI on every path; once set, reverse-proxies /.ghost/analytics/* →
+#   traffic-analytics:3000 (prefix stripped) and everything else → ghost:2368. In Coolify, point the site FQDN
 #   (e.g. godutch.us) at this service; ghost + traffic-analytics stay internal.
 # - mysql: stock mysql:8 image (no custom server image).
-# - mysql-app-init: small built sidecar (mysql/Dockerfile) runs mysql-app-bootstrap.sh via network_mode: service:mysql after mysqld is healthy.
-# - activitypub-migrate: applies ActivityPub DB migrations after mysql-app-init completes.
-#
-# Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
-#   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
-#   entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
-# Remove those lines in the application compose / overrides, redeploy, then rm -rf …/mysql-init/docker-entrypoint-shim.sh on the host if it exists.
+# - activitypub-migrate: applies ActivityPub DB migrations after wizard has bootstrapped the DB.
 services:
   wizard:
     build:
@@ -20,15 +15,21 @@ services:
       dockerfile: wizard/Dockerfile
       args:
         GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
+    depends_on:
+      mysql:
+        condition: service_healthy
     environment:
       SERVICE_URL_WIZARD_3989: ${SERVICE_URL_WIZARD_3989}
-      # Expose the public Ghost URL to the wizard UI for copy hints; assign SERVICE_URL_GHOST as the
-      # public FQDN on this service in Coolify so the browser hits wizard for everything (same-origin).
-      url: ${SERVICE_URL_GHOST}
-      SERVICE_URL_GHOST: ${SERVICE_URL_GHOST}
-      # Upstreams the wizard proxies to once setup is complete.
+      url: ${SERVICE_URL_WIZARD}
       PROXY_GHOST_UPSTREAM: http://ghost:2368
       PROXY_ANALYTICS_UPSTREAM: http://traffic-analytics:3000
+      # DB bootstrap (replaces the old mysql-app-init sidecar): idempotent CREATE USER + ALTER + DB + GRANT.
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+      MYSQL_MULTIPLE_DATABASES: ${MYSQL_MULTIPLE_DATABASES:-activitypub}
       # Wizard flips to proxy mode when all five TINYBIRD_* env vars are set (or WIZARD_SKIP=1).
       TINYBIRD_API_URL: ${TINYBIRD_API_URL:-}
       TINYBIRD_WORKSPACE_ID: ${TINYBIRD_WORKSPACE_ID:-}
@@ -41,13 +42,19 @@ services:
     volumes:
       - tinybird_home:/home/tinybird
     restart: unless-stopped
+    # Docker health = (DB bootstrap done) AND (proxy mode). Other services gate on wizard: service_healthy.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3989/__wizard/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
   ghost:
     image: ghost:${GHOST_VERSION:-6-alpine}
     environment:
-      SERVICE_URL_GHOST_2368: ${SERVICE_URL_GHOST_2368}
-      url: ${SERVICE_URL_GHOST}
+      url: ${SERVICE_URL_WIZARD}
       NODE_ENV: production
-      admin__url: ${SERVICE_URL_GHOST}
+      admin__url: ${SERVICE_URL_WIZARD}
       database__client: mysql
       database__connection__host: mysql
       database__connection__user: ${SERVICE_USER_MYSQL}
@@ -62,7 +69,7 @@ services:
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
       # Same origin as `url` — required for browser CORS. Proxy must rewrite /.ghost/analytics/* → /api/* on traffic-analytics:3000
-      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT:-${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit}
+      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT:-${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit}
       labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
@@ -73,6 +80,8 @@ services:
       - 'ghost-content-data:/var/lib/ghost/content'
     depends_on:
       mysql:
+        condition: service_healthy
+      wizard:
         condition: service_healthy
       activitypub:
         condition: service_started
@@ -98,6 +107,9 @@ services:
   traffic-analytics:
     image: ghost/traffic-analytics:1.0.154@sha256:6a77d76a98558e0355160ef5eea4f465a1545441d5690e9fa01697b66b0505ef
     restart: always
+    depends_on:
+      wizard:
+        condition: service_healthy
     expose:
       - "3000"
     volumes:
@@ -125,27 +137,12 @@ services:
       MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
       MYSQL_DATABASE: activitypub
       LOCAL_STORAGE_PATH: /opt/activitypub/content/images/activitypub
-      LOCAL_STORAGE_HOSTING_URL: ${SERVICE_URL_GHOST}/content/images/activitypub
+      LOCAL_STORAGE_HOSTING_URL: ${SERVICE_URL_WIZARD}/content/images/activitypub
     depends_on:
       mysql:
         condition: service_healthy
       activitypub-migrate:
         condition: service_completed_successfully
-
-  mysql-app-init:
-    build:
-      context: .
-      dockerfile: mysql/Dockerfile
-    network_mode: service:mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
-      MYSQL_USER: ${SERVICE_USER_MYSQL}
-      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
-      MYSQL_MULTIPLE_DATABASES: activitypub
-    depends_on:
-      mysql:
-        condition: service_healthy
-    restart: "no"
 
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
@@ -154,8 +151,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      mysql-app-init:
-        condition: service_completed_successfully
+      wizard:
+        condition: service_healthy
     restart: no
 
 volumes:

@@ -5,6 +5,7 @@ const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const util = require('util');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const mysql = require('mysql2/promise');
 
 const execFileAsync = util.promisify(execFile);
 
@@ -36,6 +37,106 @@ function nonEmpty(v) {
 function isTinybirdReady() {
   if (String(process.env.WIZARD_SKIP || '').trim() === '1') return true;
   return TINYB_ENV_KEYS.every((k) => nonEmpty(process.env[k]));
+}
+
+// ------------------------------ MySQL bootstrap ------------------------------
+// Absorbed from mysql-init/mysql-app-bootstrap.sh: idempotent sync of app user
+// password + CREATE DATABASE/GRANT for each comma-separated name in
+// MYSQL_MULTIPLE_DATABASES. Runs once at wizard start against mysql:3306.
+const MYSQL_CFG = {
+  host: process.env.MYSQL_HOST || 'mysql',
+  port: Number.parseInt(process.env.MYSQL_PORT || '3306', 10),
+  rootPassword: process.env.MYSQL_ROOT_PASSWORD || '',
+  user: process.env.MYSQL_USER || '',
+  password: process.env.MYSQL_PASSWORD || '',
+  multipleDatabases: process.env.MYSQL_MULTIPLE_DATABASES || '',
+};
+
+/** Set to true once the app user + databases + grants exist. Gates Docker healthcheck. */
+let bootstrapDone = false;
+/** Last bootstrap error, reported on the /__wizard/health endpoint for debugging. */
+let bootstrapError = null;
+
+async function connectAsRoot() {
+  const deadline = Date.now() + 60_000;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      return await mysql.createConnection({
+        host: MYSQL_CFG.host,
+        port: MYSQL_CFG.port,
+        user: 'root',
+        password: MYSQL_CFG.rootPassword,
+        connectTimeout: 5000,
+      });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  throw new Error(
+    `mysql not reachable at ${MYSQL_CFG.host}:${MYSQL_CFG.port} after 60s: ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`
+  );
+}
+
+async function bootstrapMysql() {
+  if (!MYSQL_CFG.rootPassword) {
+    throw new Error('MYSQL_ROOT_PASSWORD is required');
+  }
+  if (!MYSQL_CFG.user || !MYSQL_CFG.password) {
+    throw new Error('MYSQL_USER and MYSQL_PASSWORD are required');
+  }
+
+  const conn = await connectAsRoot();
+  try {
+    // Create-or-update app user (password sync mirrors ALTER USER in the old script).
+    await conn.query("CREATE USER IF NOT EXISTS ?@'%' IDENTIFIED BY ?", [
+      MYSQL_CFG.user,
+      MYSQL_CFG.password,
+    ]);
+    await conn.query("ALTER USER ?@'%' IDENTIFIED BY ?", [
+      MYSQL_CFG.user,
+      MYSQL_CFG.password,
+    ]);
+
+    const dbs = MYSQL_CFG.multipleDatabases
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const db of dbs) {
+      const ident = mysql.escapeId(db); // wraps in backticks, escapes inner backticks
+      await conn.query(`CREATE DATABASE IF NOT EXISTS ${ident}`);
+      await conn.query(`GRANT ALL ON ${ident}.* TO ?@'%'`, [MYSQL_CFG.user]);
+    }
+    await conn.query('FLUSH PRIVILEGES');
+  } finally {
+    try {
+      await conn.end();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function runBootstrapWithRetry() {
+  try {
+    await bootstrapMysql();
+    bootstrapDone = true;
+    bootstrapError = null;
+    console.log(
+      `mysql bootstrap complete (${MYSQL_CFG.user}@${MYSQL_CFG.host}:${MYSQL_CFG.port}${
+        MYSQL_CFG.multipleDatabases ? `, dbs=[${MYSQL_CFG.multipleDatabases}]` : ''
+      })`
+    );
+  } catch (e) {
+    bootstrapError = e instanceof Error ? e.message : String(e);
+    console.error('mysql bootstrap failed:', bootstrapError);
+    // Leave bootstrapDone=false so Docker healthcheck keeps the service unhealthy.
+    // Retry every 30s so transient mysql flaps can self-heal without a restart.
+    setTimeout(runBootstrapWithRetry, 30_000);
+  }
 }
 
 const TINYB_HOME = '/home/tinybird/.tinyb';
@@ -461,9 +562,20 @@ const app = express();
 // Traefik/Coolify sits in front; forward client IP to upstreams.
 app.set('trust proxy', true);
 
-// Health probe independent of mode
+// Docker healthcheck: healthy only when the DB bootstrap finished AND the wizard is in
+// proxy mode (i.e. TINYBIRD_* env vars set, or WIZARD_SKIP=1). Other services gate on
+// this via `depends_on: { wizard: { condition: service_healthy } }`, so they wait for
+// both the DB user+grants to exist and the Tinybird setup wizard to have been cleared.
 app.get('/__wizard/health', (_req, res) => {
-  res.json({ ok: true, proxyMode: isTinybirdReady() });
+  const proxyMode = isTinybirdReady();
+  const healthy = bootstrapDone && proxyMode;
+  const body = {
+    ok: healthy,
+    bootstrapDone,
+    bootstrapError,
+    proxyMode,
+  };
+  return res.status(healthy ? 200 : 503).json(body);
 });
 
 // --- Wizard setup UI / API (only mounted when setup is incomplete) -----------------
@@ -767,6 +879,10 @@ const server = app.listen(port, '0.0.0.0', () => {
     console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);
   }
 });
+
+// Kick off MySQL bootstrap in the background so the setup UI is reachable even if the
+// DB is slow to come up. Healthcheck stays unhealthy until this resolves.
+runBootstrapWithRetry();
 
 /** Docker sends SIGTERM on stop; close HTTP server so the process exits before stop_grace_period (avoids SIGKILL / exit 137). */
 function shutdown() {
