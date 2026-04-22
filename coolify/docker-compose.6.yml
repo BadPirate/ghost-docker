@@ -48,7 +48,7 @@ services:
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
       # Same origin as `url` — required for browser CORS. Proxy must rewrite /.ghost/analytics/* → /api/* on traffic-analytics:3000
-      tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit
+      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT:-${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit}
       labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
@@ -116,7 +116,7 @@ services:
       MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
       MYSQL_DATABASE: activitypub
       LOCAL_STORAGE_PATH: /opt/activitypub/content/images/activitypub
-      LOCAL_STORAGE_HOSTING_URL: https://${SERVICE_URL_GHOST}/content/images/activitypub
+      LOCAL_STORAGE_HOSTING_URL: ${SERVICE_URL_GHOST}/content/images/activitypub
     depends_on:
       mysql:
         condition: service_healthy
