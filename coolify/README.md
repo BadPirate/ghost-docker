@@ -4,6 +4,8 @@ Do **not** set `ADMIN_DOMAIN` to the text `SERVICE_URL_GHOST` in Coolify (that i
 
 `SERVICE_URL_GHOST` must be a full URL with **no trailing slash** (e.g. `https://godutch.us`).
 
+Set **`MAIL_FROM`** to a valid transactional From line, e.g. `"'Your Site' <noreply@mg.yourdomain.com>"` (see `.env.example` `mail__from`). Without it, Ghost logs `Missing mail.from config` and uses a generated address.
+
 ## Traffic analytics (same-origin)
 
 Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). Route `/.ghost/analytics` on that host to the **traffic-analytics** service (port **3000**) in Traefik/Coolify and **strip** the `/.ghost/analytics` prefix so the container sees `/api/v1/page_hit`, matching `caddy/snippets/TrafficAnalytics`.
