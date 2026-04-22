@@ -4,6 +4,7 @@ const express = require('express');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const util = require('util');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const execFileAsync = util.promisify(execFile);
 
@@ -13,6 +14,29 @@ const baseUrl = (
   process.env.SERVICE_URL_TINYBIRD_SETUP ||
   `http://127.0.0.1:${port}`
 ).replace(/\/$/, '');
+
+/** Upstreams for proxy mode. Override via env. */
+const GHOST_UPSTREAM = (process.env.PROXY_GHOST_UPSTREAM || 'http://ghost:2368').replace(/\/$/, '');
+const ANALYTICS_UPSTREAM = (process.env.PROXY_ANALYTICS_UPSTREAM || 'http://traffic-analytics:3000').replace(/\/$/, '');
+const ANALYTICS_PREFIX = '/.ghost/analytics';
+
+const TINYB_ENV_KEYS = [
+  'TINYBIRD_API_URL',
+  'TINYBIRD_WORKSPACE_ID',
+  'TINYBIRD_ADMIN_TOKEN',
+  'TINYBIRD_TRACKER_TOKEN',
+  'TINYBIRD_TRACKER_ENDPOINT',
+];
+
+function nonEmpty(v) {
+  return typeof v === 'string' && v.replace(/\s+/g, '') !== '';
+}
+
+/** Setup is complete when every TINYBIRD_* env var is set. `WIZARD_SKIP=1` forces proxy mode (e.g. no analytics). */
+function isTinybirdReady() {
+  if (String(process.env.WIZARD_SKIP || '').trim() === '1') return true;
+  return TINYB_ENV_KEYS.every((k) => nonEmpty(process.env[k]));
+}
 
 const TINYB_HOME = '/home/tinybird/.tinyb';
 const TB_DATA = '/data/tinybird';
@@ -434,9 +458,19 @@ async function generateTinybirdEnvFromAdminToken(pastedAdminToken) {
 }
 
 const app = express();
-app.use(express.json({ limit: '256kb' }));
+// Traefik/Coolify sits in front; forward client IP to upstreams.
+app.set('trust proxy', true);
 
-app.get('/api/tinybird/status', async (_req, res) => {
+// Health probe independent of mode
+app.get('/__wizard/health', (_req, res) => {
+  res.json({ ok: true, proxyMode: isTinybirdReady() });
+});
+
+// --- Wizard setup UI / API (only mounted when setup is incomplete) -----------------
+const wizardRouter = express.Router();
+wizardRouter.use(express.json({ limit: '256kb' }));
+
+wizardRouter.get('/api/tinybird/status', async (_req, res) => {
   try {
     await fs.access(TINYB_HOME);
     return res.json({ hasTinyb: true });
@@ -445,7 +479,7 @@ app.get('/api/tinybird/status', async (_req, res) => {
   }
 });
 
-app.post('/api/tinybird/lookup', async (req, res) => {
+wizardRouter.post('/api/tinybird/lookup', async (req, res) => {
   const adminToken =
     typeof req.body?.adminToken === 'string' ? req.body.adminToken.trim() : '';
   try {
@@ -457,7 +491,7 @@ app.post('/api/tinybird/lookup', async (req, res) => {
   }
 });
 
-app.post('/api/tinybird/generate', async (req, res) => {
+wizardRouter.post('/api/tinybird/generate', async (req, res) => {
   const adminToken =
     typeof req.body?.adminToken === 'string' ? req.body.adminToken.trim() : '';
   const out = await generateTinybirdEnvFromAdminToken(adminToken);
@@ -482,7 +516,7 @@ app.post('/api/tinybird/generate', async (req, res) => {
   });
 });
 
-app.post('/api/tinybird/auth', async (req, res) => {
+wizardRouter.post('/api/tinybird/auth', async (req, res) => {
   try {
     let body = req.body;
     if (typeof body.tinyb === 'string') {
@@ -505,7 +539,7 @@ app.post('/api/tinybird/auth', async (req, res) => {
   }
 });
 
-app.post('/api/tinybird/deploy', async (req, res) => {
+wizardRouter.post('/api/tinybird/deploy', async (req, res) => {
   const userApiUrl =
     typeof req.body?.apiUrl === 'string' ? req.body.apiUrl.trim() : '';
   const adminToken =
@@ -562,7 +596,7 @@ app.post('/api/tinybird/deploy', async (req, res) => {
   }
 });
 
-app.get('/api/tinybird/env', async (_req, res) => {
+wizardRouter.get('/api/tinybird/env', async (_req, res) => {
   try {
     await fs.access(TINYB_HOME);
   } catch {
@@ -688,16 +722,50 @@ function wizardPage() {
 </html>`;
 }
 
-app.get('/tinybird_setup', (_req, res) => {
+wizardRouter.get('/tinybird_setup', (_req, res) => {
   res.type('html').send(wizardPage());
 });
 
-app.get('/', (_req, res) => {
-  res.redirect(302, '/tinybird_setup');
-});
+// --- Mount mode ------------------------------------------------------------
+const PROXY_MODE = isTinybirdReady();
+
+if (PROXY_MODE) {
+  // Same-origin analytics: strip `/.ghost/analytics` before forwarding to traffic-analytics:3000.
+  app.use(
+    ANALYTICS_PREFIX,
+    createProxyMiddleware({
+      target: ANALYTICS_UPSTREAM,
+      changeOrigin: true,
+      xfwd: true,
+      logLevel: 'warn',
+    })
+  );
+
+  // Everything else proxies to Ghost. Preserve Host so Ghost sees the public URL.
+  app.use(
+    createProxyMiddleware({
+      target: GHOST_UPSTREAM,
+      changeOrigin: false,
+      xfwd: true,
+      ws: true,
+      logLevel: 'warn',
+    })
+  );
+} else {
+  app.use(wizardRouter);
+  app.get('/', (_req, res) => res.redirect(302, '/tinybird_setup'));
+  // Catch-all: until setup is done, every request lands on the wizard.
+  app.use((_req, res) => res.redirect(302, '/tinybird_setup'));
+}
 
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);
+  if (PROXY_MODE) {
+    console.log(
+      `wizard: proxy mode — ${ANALYTICS_PREFIX}/* -> ${ANALYTICS_UPSTREAM} (strip prefix); /* -> ${GHOST_UPSTREAM}`
+    );
+  } else {
+    console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);
+  }
 });
 
 /** Docker sends SIGTERM on stop; close HTTP server so the process exits before stop_grace_period (avoids SIGKILL / exit 137). */

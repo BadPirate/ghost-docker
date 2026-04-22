@@ -6,11 +6,18 @@ Do **not** set `ADMIN_DOMAIN` to the text `SERVICE_URL_GHOST` in Coolify (that i
 
 Set **`MAIL_FROM`** to a valid transactional From line, e.g. `"'Your Site' <noreply@mg.yourdomain.com>"` (see `.env.example` `mail__from`). Without it, Ghost logs `Missing mail.from config` and uses a generated address.
 
-## Traffic analytics (same-origin)
+## Wizard front door (same-origin)
 
-Ghost is configured with `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` so the browser hits the **same host** as the site (CORS). The proxy must **strip** the `/.ghost/analytics` prefix and forward to **`traffic-analytics:3000`** (same as `caddy/snippets/TrafficAnalytics` — **`stripPrefix`**, not a client redirect to the public analytics host).
+The **`wizard`** service is the **only** service that needs a public Coolify domain — point `SERVICE_URL_GHOST` (e.g. `godutch.us`) at it on port **3989**. The wizard is a small Express server that:
 
-**Traefik (Coolify):** compose no longer includes Traefik labels for this. Use a **file provider**; see `traefik-ghost-analytics.godutch.dynamic.yaml` (godutch.us → internal traffic-analytics). Mount it in your Traefik static config, fix `entryPoints` and the load-balancer `url` to match your network (often `http://traffic-analytics:3000` from Traefik on the app network).
+- Until all five **`TINYBIRD_*`** env vars are set, serves the setup UI on every path.
+- Once they are set (Coolify redeploy), it **reverse-proxies**:
+  - `/.ghost/analytics/*` → `http://traffic-analytics:3000/*` (prefix stripped, same as `caddy/snippets/TrafficAnalytics`)
+  - everything else → `http://ghost:2368`
+
+Because it runs on the same origin as the blog, Ghost’s `tinybird__tracker__endpoint: ${SERVICE_URL_GHOST}/.ghost/analytics/api/v1/page_hit` posts stay same-origin (no CORS, no Traefik labels, no dynamic-config file). `ghost` and `traffic-analytics` do not need public Coolify FQDNs.
+
+Override upstreams with `PROXY_GHOST_UPSTREAM` / `PROXY_ANALYTICS_UPSTREAM` if the Docker DNS names differ. Set `WIZARD_SKIP=1` to force proxy mode (e.g. if you do not want analytics at all).
 
 ## Migration
 

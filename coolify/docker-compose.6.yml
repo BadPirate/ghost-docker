@@ -1,13 +1,13 @@
 ---
-# Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
+# Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate + wizard (front-door proxy).
 # Build context for wizard + mysql/Dockerfile is the repo root (Coolify uses --project-directory to the clone).
+# - wizard: the only publicly-exposed service. When TINYBIRD_* env vars are unset it serves a setup UI on every
+#   path; once they are set, it reverse-proxies `/.ghost/analytics/*` → traffic-analytics:3000 (prefix stripped)
+#   and everything else → ghost:2368. Same-origin means no CORS/Traefik tricks. In Coolify, point the site FQDN
+#   (e.g. godutch.us) at this service; ghost + traffic-analytics stay internal.
 # - mysql: stock mysql:8 image (no custom server image).
 # - mysql-app-init: small built sidecar (mysql/Dockerfile) runs mysql-app-bootstrap.sh via network_mode: service:mysql after mysqld is healthy.
-# - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
 # - activitypub-migrate: applies ActivityPub DB migrations after mysql-app-init completes.
-#
-# Analytics (same-origin / CORS): Ghost’s tracker is ${SERVICE_URL_GHOST}/.ghost/analytics/… — proxy with path strip
-# to traffic-analytics:3000 (see caddy/snippets/TrafficAnalytics and coolify/traefik-ghost-analytics.godutch.dynamic.yaml).
 #
 # Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
 #   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
@@ -22,12 +22,25 @@ services:
         GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
     environment:
       SERVICE_URL_WIZARD_3989: ${SERVICE_URL_WIZARD_3989}
-      url: ${SERVICE_URL_WIZARD}
+      # Expose the public Ghost URL to the wizard UI for copy hints; assign SERVICE_URL_GHOST as the
+      # public FQDN on this service in Coolify so the browser hits wizard for everything (same-origin).
+      url: ${SERVICE_URL_GHOST}
+      SERVICE_URL_GHOST: ${SERVICE_URL_GHOST}
+      # Upstreams the wizard proxies to once setup is complete.
+      PROXY_GHOST_UPSTREAM: http://ghost:2368
+      PROXY_ANALYTICS_UPSTREAM: http://traffic-analytics:3000
+      # Wizard flips to proxy mode when all five TINYBIRD_* env vars are set (or WIZARD_SKIP=1).
+      TINYBIRD_API_URL: ${TINYBIRD_API_URL:-}
+      TINYBIRD_WORKSPACE_ID: ${TINYBIRD_WORKSPACE_ID:-}
+      TINYBIRD_ADMIN_TOKEN: ${TINYBIRD_ADMIN_TOKEN:-}
+      TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
+      TINYBIRD_TRACKER_ENDPOINT: ${TINYBIRD_TRACKER_ENDPOINT:-}
+      WIZARD_SKIP: ${WIZARD_SKIP:-}
     expose:
       - "3989"
     volumes:
       - tinybird_home:/home/tinybird
-    restart: "no"
+    restart: unless-stopped
   ghost:
     image: ghost:${GHOST_VERSION:-6-alpine}
     environment:
@@ -61,8 +74,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      wizard:
-        condition: service_completed_successfully
       activitypub:
         condition: service_started
         required: false
@@ -87,9 +98,6 @@ services:
   traffic-analytics:
     image: ghost/traffic-analytics:1.0.154@sha256:6a77d76a98558e0355160ef5eea4f465a1545441d5690e9fa01697b66b0505ef
     restart: always
-    depends_on:
-      wizard:
-        condition: service_completed_successfully
     expose:
       - "3000"
     volumes:
@@ -122,8 +130,6 @@ services:
       mysql:
         condition: service_healthy
       activitypub-migrate:
-        condition: service_completed_successfully
-      wizard:
         condition: service_completed_successfully
 
   mysql-app-init:
