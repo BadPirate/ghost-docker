@@ -86,6 +86,13 @@ services:
       activitypub:
         condition: service_started
         required: false
+    # ghost:6-alpine has BusyBox wget. `/` returns 200 once Ghost has migrated and is serving.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "--spider", "http://127.0.0.1:2368/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
   mysql:
     image: mysql:8
     restart: always
@@ -123,6 +130,13 @@ services:
       SALT_STORE_FILE_PATH: /data/salts.json
       TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
       LOG_LEVEL: debug
+    # ghost/traffic-analytics is alpine-based with BusyBox wget; `/` returns 200.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
   activitypub:
     image: ghcr.io/tryghost/activitypub:1.1.0@sha256:39c212fe23603b182d68e67d555c6b9b04b1e57459dfc0bef26d6e4980eb04d1
     restart: always
@@ -143,6 +157,16 @@ services:
         condition: service_healthy
       activitypub-migrate:
         condition: service_completed_successfully
+    # activitypub (alpine + BusyBox wget) does not expose a documented health URL; accept
+    # any HTTP response on :8080 as "process listening" (HEAD request; grep for a status line).
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:8080/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
@@ -154,6 +178,14 @@ services:
       wizard:
         condition: service_healthy
     restart: no
+    # One-shot job: no HTTP server to probe. `true` keeps it "healthy" while running;
+    # downstream services gate on service_completed_successfully, not service_healthy.
+    healthcheck:
+      test: ["CMD", "/usr/bin/true"]
+      interval: 10s
+      timeout: 3s
+      retries: 1
+      start_period: 5s
 
 volumes:
   caddy_data:

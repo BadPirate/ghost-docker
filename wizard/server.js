@@ -843,12 +843,16 @@ const PROXY_MODE = isTinybirdReady();
 
 if (PROXY_MODE) {
   // Same-origin analytics: strip `/.ghost/analytics` before forwarding to traffic-analytics:3000.
+  // NOTE: http-proxy-middleware v2 forwards `req.originalUrl` even when mounted under a
+  // prefix via `app.use(prefix, proxy)`, so Express' built-in prefix strip is ignored and
+  // traffic-analytics sees `/.ghost/analytics/api/...` → 404. `pathRewrite` does the strip.
   app.use(
     ANALYTICS_PREFIX,
     createProxyMiddleware({
       target: ANALYTICS_UPSTREAM,
       changeOrigin: true,
       xfwd: true,
+      pathRewrite: { [`^${ANALYTICS_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`]: '' },
       logLevel: 'warn',
     })
   );
