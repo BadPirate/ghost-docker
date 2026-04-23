@@ -19,7 +19,14 @@ const baseUrl = (
 /** Upstreams for proxy mode. Override via env. */
 const GHOST_UPSTREAM = (process.env.PROXY_GHOST_UPSTREAM || 'http://ghost:2368').replace(/\/$/, '');
 const ANALYTICS_UPSTREAM = (process.env.PROXY_ANALYTICS_UPSTREAM || 'http://traffic-analytics:3000').replace(/\/$/, '');
+const ACTIVITYPUB_UPSTREAM = (process.env.PROXY_ACTIVITYPUB_UPSTREAM || 'http://activitypub:8080').replace(/\/$/, '');
 const ANALYTICS_PREFIX = '/.ghost/analytics';
+/** Paths routed to the ActivityPub service (forwarded as-is, no prefix strip — matches caddy/snippets/ActivityPub). */
+const ACTIVITYPUB_PREFIXES = [
+  '/.ghost/activitypub',
+  '/.well-known/webfinger',
+  '/.well-known/nodeinfo',
+];
 
 // NOTE: TINYBIRD_TRACKER_ENDPOINT is NOT in this list — Ghost's tracker endpoint is
 // hardcoded in coolify/docker-compose.6.yml to `${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit`
@@ -848,6 +855,19 @@ if (PROXY_MODE) {
     })
   );
 
+  // ActivityPub (federation): forward the path untouched — matches caddy/snippets/ActivityPub.
+  // http-proxy-middleware v2 uses req.originalUrl, so `/.ghost/activitypub/v1/site/` arrives
+  // at activitypub:8080 intact (no pathRewrite needed).
+  const activitypubProxy = createProxyMiddleware({
+    target: ACTIVITYPUB_UPSTREAM,
+    changeOrigin: true,
+    xfwd: true,
+    logLevel: 'warn',
+  });
+  for (const prefix of ACTIVITYPUB_PREFIXES) {
+    app.use(prefix, activitypubProxy);
+  }
+
   // Everything else proxies to Ghost. Preserve Host so Ghost sees the public URL.
   app.use(
     createProxyMiddleware({
@@ -868,7 +888,8 @@ if (PROXY_MODE) {
 const server = app.listen(port, '0.0.0.0', () => {
   if (PROXY_MODE) {
     console.log(
-      `wizard: proxy mode — ${ANALYTICS_PREFIX}/* -> ${ANALYTICS_UPSTREAM} (strip prefix); /* -> ${GHOST_UPSTREAM}`
+      `wizard: proxy mode — ${ANALYTICS_PREFIX}/* -> ${ANALYTICS_UPSTREAM} (strip prefix); ` +
+        `${ACTIVITYPUB_PREFIXES.join(', ')} -> ${ACTIVITYPUB_UPSTREAM}; /* -> ${GHOST_UPSTREAM}`
     );
   } else {
     console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);

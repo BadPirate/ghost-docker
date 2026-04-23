@@ -85,13 +85,18 @@ services:
       activitypub:
         condition: service_started
         required: false
-    # ghost:6-alpine has BusyBox wget. `/` returns 200 once Ghost has migrated and is serving.
+    # Ghost redirects `/` to its configured public URL (https://…), so `wget --spider` would
+    # follow the redirect out of the container and time out on slow hosts. Instead, treat
+    # "server answered with any HTTP status line" as alive (busybox wget prints `HTTP/1.1 …`
+    # on stderr with -S even for redirects).
     healthcheck:
-      test: ["CMD", "wget", "-q", "-T", "3", "--spider", "http://127.0.0.1:2368/"]
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:2368/ 2>&1 | grep -q 'HTTP/'"
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 60s
+      retries: 18
+      start_period: 120s
   mysql:
     image: mysql:8
     restart: always
@@ -129,9 +134,12 @@ services:
       SALT_STORE_FILE_PATH: /data/salts.json
       TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
       LOG_LEVEL: debug
-    # ghost/traffic-analytics is alpine-based with BusyBox wget; `/` returns 200.
+    # ghost/traffic-analytics is alpine-based with BusyBox wget. "Any HTTP response = alive"
+    # so we do not care whether `/` currently 200s or redirects in a future version.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-T", "3", "--spider", "http://127.0.0.1:3000/"]
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:3000/ 2>&1 | grep -q 'HTTP/'"
       interval: 10s
       timeout: 5s
       retries: 6
