@@ -1,15 +1,13 @@
 ---
-# Stack: Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
-# Build context for wizard + mysql/Dockerfile is the repo root (Coolify uses --project-directory to the clone).
+# Stack: wizard (front door) + Ghost 6 + MySQL + traffic analytics (Tinybird) + ActivityPub + activitypub-migrate.
+# Build context for wizard is the repo root (Coolify uses --project-directory to the clone).
+# - wizard: the only publicly-exposed service. Absorbs the old mysql-app-init (app user + GRANTs + multiple DBs).
+#   Healthy only once DB bootstrap + TINYBIRD_* setup are both done; other services gate on that via depends_on.
+#   Until TINYBIRD_* is set, serves a setup UI on every path; once set, reverse-proxies /.ghost/analytics/* →
+#   traffic-analytics:3000 (prefix stripped) and everything else → ghost:2368. In Coolify, point the site FQDN
+#   (e.g. godutch.us) at this service; ghost + traffic-analytics stay internal.
 # - mysql: stock mysql:8 image (no custom server image).
-# - mysql-app-init: small built sidecar (mysql/Dockerfile) runs mysql-app-bootstrap.sh via network_mode: service:mysql after mysqld is healthy.
-# - wizard: until TINYBIRD_* is set, serves a wizard that syncs (image-baked datafiles), deploys (tb --cloud deploy), and exports tokens—replacing tinybird-* compose services on Coolify.
-# - activitypub-migrate: applies ActivityPub DB migrations after mysql-app-init completes.
-#
-# Coolify: if logs show "/docker-entrypoint-shim.sh: Is a directory", the UI is still merging an OLD compose snippet:
-#   volumes: …/docker-entrypoint-shim.sh:/docker-entrypoint-shim.sh
-#   entrypoint: ["/bin/bash", "/docker-entrypoint-shim.sh"]
-# Remove those lines in the application compose / overrides, redeploy, then rm -rf …/mysql-init/docker-entrypoint-shim.sh on the host if it exists.
+# - activitypub-migrate: applies ActivityPub DB migrations after wizard has bootstrapped the DB.
 services:
   wizard:
     build:
@@ -17,36 +15,65 @@ services:
       dockerfile: wizard/Dockerfile
       args:
         GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
+    depends_on:
+      mysql:
+        condition: service_healthy
     environment:
       SERVICE_URL_WIZARD_3989: ${SERVICE_URL_WIZARD_3989}
       url: ${SERVICE_URL_WIZARD}
+      PROXY_GHOST_UPSTREAM: http://ghost:2368
+      PROXY_ANALYTICS_UPSTREAM: http://traffic-analytics:3000
+      # DB bootstrap (replaces the old mysql-app-init sidecar): idempotent CREATE USER + ALTER + DB + GRANT.
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
+      MYSQL_USER: ${SERVICE_USER_MYSQL}
+      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
+      MYSQL_MULTIPLE_DATABASES: ${MYSQL_MULTIPLE_DATABASES:-activitypub}
+      # Wizard flips to proxy mode when all five TINYBIRD_* env vars are set (or WIZARD_SKIP=1).
+      TINYBIRD_API_URL: ${TINYBIRD_API_URL:-}
+      TINYBIRD_WORKSPACE_ID: ${TINYBIRD_WORKSPACE_ID:-}
+      TINYBIRD_ADMIN_TOKEN: ${TINYBIRD_ADMIN_TOKEN:-}
+      TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
+      WIZARD_SKIP: ${WIZARD_SKIP:-}
     expose:
       - "3989"
     volumes:
       - tinybird_home:/home/tinybird
-    restart: "no"
+    restart: unless-stopped
+    # Docker health = (DB bootstrap done) AND (proxy mode). Other services gate on wizard: service_healthy.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3989/__wizard/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
   ghost:
     image: ghost:${GHOST_VERSION:-6-alpine}
     environment:
-      SERVICE_URL_GHOST_2368: ${SERVICE_URL_GHOST_2368}
-      url: ${SERVICE_URL_GHOST}
+      url: ${SERVICE_URL_WIZARD}
       NODE_ENV: production
-      admin__url: ${SERVICE_URL_GHOST}
+      admin__url: ${SERVICE_URL_WIZARD}
       database__client: mysql
       database__connection__host: mysql
       database__connection__user: ${SERVICE_USER_MYSQL}
       database__connection__password: ${SERVICE_PASSWORD_MYSQL}
       database__connection__database: ${MYSQL_DATABASE-ghost}
+      mail__transport: SMTP
+      mail__from: ${MAIL_FROM}
       mail__options__auth__pass: ${MAIL_OPTIONS_AUTH_PASS}
       mail__options__auth__user: ${MAIL_OPTIONS_AUTH_USER}
       mail__options__secure: ${MAIL_OPTIONS_SECURE:-true}
       mail__options__port: ${MAIL_OPTIONS_PORT:-465}
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
-      tinybird__tracker__endpoint: ${TINYBIRD_TRACKER_ENDPOINT}
+      # Same-origin (browser CORS). Wizard strips /.ghost/analytics and forwards to traffic-analytics:3000/api/v1/page_hit.
+      tinybird__tracker__endpoint: ${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit
+      labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
       tinybird__tracker__datasource: analytics_events
+      # Admin/stats read from Tinybird API (not via traffic-analytics)
       tinybird__stats__endpoint: ${TINYBIRD_API_URL:-https://api.tinybird.co}
     volumes:
       - 'ghost-content-data:/var/lib/ghost/content'
@@ -54,10 +81,22 @@ services:
       mysql:
         condition: service_healthy
       wizard:
-        condition: service_completed_successfully
+        condition: service_healthy
       activitypub:
         condition: service_started
         required: false
+    # Ghost redirects `/` to its configured public URL (https://…), so `wget --spider` would
+    # follow the redirect out of the container and time out on slow hosts. Instead, treat
+    # "server answered with any HTTP status line" as alive (busybox wget prints `HTTP/1.1 …`
+    # on stderr with -S even for redirects).
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:2368/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 120s
   mysql:
     image: mysql:8
     restart: always
@@ -81,18 +120,30 @@ services:
     restart: always
     depends_on:
       wizard:
-        condition: service_completed_successfully
+        condition: service_healthy
     expose:
       - "3000"
     volumes:
       - traffic_analytics_data:/data
     environment:
       NODE_ENV: production
+      # Behind Traefik/Coolify; client IP from X-Forwarded-For (see TryGhost/TrafficAnalytics)
+      TRUST_PROXY: "true"
       PROXY_TARGET: ${TINYBIRD_API_URL:-https://api.tinybird.co}/v0/events
       SALT_STORE_TYPE: ${SALT_STORE_TYPE:-file}
       SALT_STORE_FILE_PATH: /data/salts.json
       TINYBIRD_TRACKER_TOKEN: ${TINYBIRD_TRACKER_TOKEN:-}
       LOG_LEVEL: debug
+    # ghost/traffic-analytics is alpine-based with BusyBox wget. "Any HTTP response = alive"
+    # so we do not care whether `/` currently 200s or redirects in a future version.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:3000/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
   activitypub:
     image: ghcr.io/tryghost/activitypub:1.1.0@sha256:39c212fe23603b182d68e67d555c6b9b04b1e57459dfc0bef26d6e4980eb04d1
     restart: always
@@ -107,29 +158,22 @@ services:
       MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
       MYSQL_DATABASE: activitypub
       LOCAL_STORAGE_PATH: /opt/activitypub/content/images/activitypub
-      LOCAL_STORAGE_HOSTING_URL: https://${SERVICE_URL_GHOST}/content/images/activitypub
+      LOCAL_STORAGE_HOSTING_URL: ${SERVICE_URL_WIZARD}/content/images/activitypub
     depends_on:
       mysql:
         condition: service_healthy
       activitypub-migrate:
         condition: service_completed_successfully
-      wizard:
-        condition: service_completed_successfully
-
-  mysql-app-init:
-    build:
-      context: .
-      dockerfile: mysql/Dockerfile
-    network_mode: service:mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${SERVICE_PASSWORD_MYSQLROOT}
-      MYSQL_USER: ${SERVICE_USER_MYSQL}
-      MYSQL_PASSWORD: ${SERVICE_PASSWORD_MYSQL}
-      MYSQL_MULTIPLE_DATABASES: activitypub
-    depends_on:
-      mysql:
-        condition: service_healthy
-    restart: "no"
+    # activitypub (alpine + BusyBox wget) does not expose a documented health URL; accept
+    # any HTTP response on :8080 as "process listening" (HEAD request; grep for a status line).
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -S -T 3 --spider http://127.0.0.1:8080/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   activitypub-migrate:
     image: ghcr.io/tryghost/activitypub-migrations:1.1.0@sha256:b3ab20f55d66eb79090130ff91b57fe93f8a4254b446c2c7fa4507535f503662
@@ -138,9 +182,17 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      mysql-app-init:
-        condition: service_completed_successfully
+      wizard:
+        condition: service_healthy
     restart: no
+    # One-shot job: no HTTP server to probe. `true` keeps it "healthy" while running;
+    # downstream services gate on service_completed_successfully, not service_healthy.
+    healthcheck:
+      test: ["CMD", "/usr/bin/true"]
+      interval: 10s
+      timeout: 3s
+      retries: 1
+      start_period: 5s
 
 volumes:
   caddy_data:

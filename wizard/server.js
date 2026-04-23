@@ -4,6 +4,8 @@ const express = require('express');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const util = require('util');
+const { createProxyMiddleware } = require('http-proxy-middleware');
+const mysql = require('mysql2/promise');
 
 const execFileAsync = util.promisify(execFile);
 
@@ -13,6 +15,140 @@ const baseUrl = (
   process.env.SERVICE_URL_TINYBIRD_SETUP ||
   `http://127.0.0.1:${port}`
 ).replace(/\/$/, '');
+
+/** Upstreams for proxy mode. Override via env. */
+const GHOST_UPSTREAM = (process.env.PROXY_GHOST_UPSTREAM || 'http://ghost:2368').replace(/\/$/, '');
+const ANALYTICS_UPSTREAM = (process.env.PROXY_ANALYTICS_UPSTREAM || 'http://traffic-analytics:3000').replace(/\/$/, '');
+const ACTIVITYPUB_UPSTREAM = (process.env.PROXY_ACTIVITYPUB_UPSTREAM || 'http://activitypub:8080').replace(/\/$/, '');
+const ANALYTICS_PREFIX = '/.ghost/analytics';
+/** Paths routed to the ActivityPub service (forwarded as-is, no prefix strip — matches caddy/snippets/ActivityPub). */
+const ACTIVITYPUB_PREFIXES = [
+  '/.ghost/activitypub',
+  '/.well-known/webfinger',
+  '/.well-known/nodeinfo',
+];
+
+// NOTE: TINYBIRD_TRACKER_ENDPOINT is NOT in this list — Ghost's tracker endpoint is
+// hardcoded in coolify/docker-compose.6.yml to `${SERVICE_URL_WIZARD}/.ghost/analytics/api/v1/page_hit`
+// (same-origin, wizard strips the prefix and forwards to traffic-analytics). The browser
+// posts directly to traffic-analytics via the wizard proxy; Tinybird's own `/v0/events`
+// endpoint is never contacted from the client, so we don't need to surface that URL.
+const TINYB_ENV_KEYS = [
+  'TINYBIRD_API_URL',
+  'TINYBIRD_WORKSPACE_ID',
+  'TINYBIRD_ADMIN_TOKEN',
+  'TINYBIRD_TRACKER_TOKEN',
+];
+
+function nonEmpty(v) {
+  return typeof v === 'string' && v.replace(/\s+/g, '') !== '';
+}
+
+/** Setup is complete when every TINYBIRD_* env var is set. `WIZARD_SKIP=1` forces proxy mode (e.g. no analytics). */
+function isTinybirdReady() {
+  if (String(process.env.WIZARD_SKIP || '').trim() === '1') return true;
+  return TINYB_ENV_KEYS.every((k) => nonEmpty(process.env[k]));
+}
+
+// ------------------------------ MySQL bootstrap ------------------------------
+// Absorbed from mysql-init/mysql-app-bootstrap.sh: idempotent sync of app user
+// password + CREATE DATABASE/GRANT for each comma-separated name in
+// MYSQL_MULTIPLE_DATABASES. Runs once at wizard start against mysql:3306.
+const MYSQL_CFG = {
+  host: process.env.MYSQL_HOST || 'mysql',
+  port: Number.parseInt(process.env.MYSQL_PORT || '3306', 10),
+  rootPassword: process.env.MYSQL_ROOT_PASSWORD || '',
+  user: process.env.MYSQL_USER || '',
+  password: process.env.MYSQL_PASSWORD || '',
+  multipleDatabases: process.env.MYSQL_MULTIPLE_DATABASES || '',
+};
+
+/** Set to true once the app user + databases + grants exist. Gates Docker healthcheck. */
+let bootstrapDone = false;
+/** Last bootstrap error, reported on the /__wizard/health endpoint for debugging. */
+let bootstrapError = null;
+
+async function connectAsRoot() {
+  const deadline = Date.now() + 60_000;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      return await mysql.createConnection({
+        host: MYSQL_CFG.host,
+        port: MYSQL_CFG.port,
+        user: 'root',
+        password: MYSQL_CFG.rootPassword,
+        connectTimeout: 5000,
+      });
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  throw new Error(
+    `mysql not reachable at ${MYSQL_CFG.host}:${MYSQL_CFG.port} after 60s: ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`
+  );
+}
+
+async function bootstrapMysql() {
+  if (!MYSQL_CFG.rootPassword) {
+    throw new Error('MYSQL_ROOT_PASSWORD is required');
+  }
+  if (!MYSQL_CFG.user || !MYSQL_CFG.password) {
+    throw new Error('MYSQL_USER and MYSQL_PASSWORD are required');
+  }
+
+  const conn = await connectAsRoot();
+  try {
+    // Create-or-update app user (password sync mirrors ALTER USER in the old script).
+    await conn.query("CREATE USER IF NOT EXISTS ?@'%' IDENTIFIED BY ?", [
+      MYSQL_CFG.user,
+      MYSQL_CFG.password,
+    ]);
+    await conn.query("ALTER USER ?@'%' IDENTIFIED BY ?", [
+      MYSQL_CFG.user,
+      MYSQL_CFG.password,
+    ]);
+
+    const dbs = MYSQL_CFG.multipleDatabases
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const db of dbs) {
+      const ident = mysql.escapeId(db); // wraps in backticks, escapes inner backticks
+      await conn.query(`CREATE DATABASE IF NOT EXISTS ${ident}`);
+      await conn.query(`GRANT ALL ON ${ident}.* TO ?@'%'`, [MYSQL_CFG.user]);
+    }
+    await conn.query('FLUSH PRIVILEGES');
+  } finally {
+    try {
+      await conn.end();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function runBootstrapWithRetry() {
+  try {
+    await bootstrapMysql();
+    bootstrapDone = true;
+    bootstrapError = null;
+    console.log(
+      `mysql bootstrap complete (${MYSQL_CFG.user}@${MYSQL_CFG.host}:${MYSQL_CFG.port}${
+        MYSQL_CFG.multipleDatabases ? `, dbs=[${MYSQL_CFG.multipleDatabases}]` : ''
+      })`
+    );
+  } catch (e) {
+    bootstrapError = e instanceof Error ? e.message : String(e);
+    console.error('mysql bootstrap failed:', bootstrapError);
+    // Leave bootstrapDone=false so Docker healthcheck keeps the service unhealthy.
+    // Retry every 30s so transient mysql flaps can self-heal without a restart.
+    setTimeout(runBootstrapWithRetry, 30_000);
+  }
+}
 
 const TINYB_HOME = '/home/tinybird/.tinyb';
 const TB_DATA = '/data/tinybird';
@@ -271,16 +407,9 @@ async function lookupEnvFromAdminToken(adminToken) {
     TINYBIRD_WORKSPACE_ID: workspaceId,
     TINYBIRD_ADMIN_TOKEN: admin,
     TINYBIRD_TRACKER_TOKEN: tracker || '',
-    TINYBIRD_TRACKER_ENDPOINT: trackerEndpointFromApiUrl(apiBase),
     TINYBIRD_LOOKUP_INCOMPLETE: incomplete,
     lookupHint,
   };
-}
-
-function trackerEndpointFromApiUrl(apiUrl) {
-  if (!apiUrl || typeof apiUrl !== 'string') return '';
-  const u = apiUrl.replace(/\/$/, '');
-  return `${u}/v0/events`;
 }
 
 function parseEnvLines(text) {
@@ -317,10 +446,7 @@ async function fetchEnvFromTinybird() {
   if (stderr && stderr.trim()) {
     console.error('get-tokens stderr:', stderr);
   }
-  const vars = parseEnvLines(stdout);
-  const apiUrl = vars.TINYBIRD_API_URL || '';
-  vars.TINYBIRD_TRACKER_ENDPOINT = trackerEndpointFromApiUrl(apiUrl);
-  return vars;
+  return parseEnvLines(stdout);
 }
 
 async function deployWithUiToken(apiUrl, adminToken) {
@@ -354,13 +480,11 @@ function formatTinybirdEnvBlock(env) {
   const w = env.TINYBIRD_WORKSPACE_ID || '';
   const adm = env.TINYBIRD_ADMIN_TOKEN || '';
   const tr = env.TINYBIRD_TRACKER_TOKEN || '';
-  const ep = env.TINYBIRD_TRACKER_ENDPOINT || trackerEndpointFromApiUrl(a);
   return [
     `TINYBIRD_API_URL=${a}`,
     `TINYBIRD_WORKSPACE_ID=${w}`,
     `TINYBIRD_ADMIN_TOKEN=${adm}`,
     `TINYBIRD_TRACKER_TOKEN=${tr}`,
-    `TINYBIRD_TRACKER_ENDPOINT=${ep}`,
   ].join('\n');
 }
 
@@ -434,9 +558,30 @@ async function generateTinybirdEnvFromAdminToken(pastedAdminToken) {
 }
 
 const app = express();
-app.use(express.json({ limit: '256kb' }));
+// Traefik/Coolify sits in front; forward client IP to upstreams.
+app.set('trust proxy', true);
 
-app.get('/api/tinybird/status', async (_req, res) => {
+// Docker healthcheck: healthy only when the DB bootstrap finished AND the wizard is in
+// proxy mode (i.e. TINYBIRD_* env vars set, or WIZARD_SKIP=1). Other services gate on
+// this via `depends_on: { wizard: { condition: service_healthy } }`, so they wait for
+// both the DB user+grants to exist and the Tinybird setup wizard to have been cleared.
+app.get('/__wizard/health', (_req, res) => {
+  const proxyMode = isTinybirdReady();
+  const healthy = bootstrapDone && proxyMode;
+  const body = {
+    ok: healthy,
+    bootstrapDone,
+    bootstrapError,
+    proxyMode,
+  };
+  return res.status(healthy ? 200 : 503).json(body);
+});
+
+// --- Wizard setup UI / API (only mounted when setup is incomplete) -----------------
+const wizardRouter = express.Router();
+wizardRouter.use(express.json({ limit: '256kb' }));
+
+wizardRouter.get('/api/tinybird/status', async (_req, res) => {
   try {
     await fs.access(TINYB_HOME);
     return res.json({ hasTinyb: true });
@@ -445,7 +590,7 @@ app.get('/api/tinybird/status', async (_req, res) => {
   }
 });
 
-app.post('/api/tinybird/lookup', async (req, res) => {
+wizardRouter.post('/api/tinybird/lookup', async (req, res) => {
   const adminToken =
     typeof req.body?.adminToken === 'string' ? req.body.adminToken.trim() : '';
   try {
@@ -457,7 +602,7 @@ app.post('/api/tinybird/lookup', async (req, res) => {
   }
 });
 
-app.post('/api/tinybird/generate', async (req, res) => {
+wizardRouter.post('/api/tinybird/generate', async (req, res) => {
   const adminToken =
     typeof req.body?.adminToken === 'string' ? req.body.adminToken.trim() : '';
   const out = await generateTinybirdEnvFromAdminToken(adminToken);
@@ -478,11 +623,10 @@ app.post('/api/tinybird/generate', async (req, res) => {
     TINYBIRD_WORKSPACE_ID: out.env.TINYBIRD_WORKSPACE_ID,
     TINYBIRD_ADMIN_TOKEN: out.env.TINYBIRD_ADMIN_TOKEN,
     TINYBIRD_TRACKER_TOKEN: out.env.TINYBIRD_TRACKER_TOKEN,
-    TINYBIRD_TRACKER_ENDPOINT: out.env.TINYBIRD_TRACKER_ENDPOINT,
   });
 });
 
-app.post('/api/tinybird/auth', async (req, res) => {
+wizardRouter.post('/api/tinybird/auth', async (req, res) => {
   try {
     let body = req.body;
     if (typeof body.tinyb === 'string') {
@@ -505,7 +649,7 @@ app.post('/api/tinybird/auth', async (req, res) => {
   }
 });
 
-app.post('/api/tinybird/deploy', async (req, res) => {
+wizardRouter.post('/api/tinybird/deploy', async (req, res) => {
   const userApiUrl =
     typeof req.body?.apiUrl === 'string' ? req.body.apiUrl.trim() : '';
   const adminToken =
@@ -562,7 +706,7 @@ app.post('/api/tinybird/deploy', async (req, res) => {
   }
 });
 
-app.get('/api/tinybird/env', async (_req, res) => {
+wizardRouter.get('/api/tinybird/env', async (_req, res) => {
   try {
     await fs.access(TINYB_HOME);
   } catch {
@@ -610,7 +754,7 @@ function wizardPage() {
 </head>
 <body>
   <h1>Setup Tinybird</h1>
-  <p class="lede">Your stack needs <code>TINYBIRD_API_URL</code>, <code>TINYBIRD_WORKSPACE_ID</code>, <code>TINYBIRD_ADMIN_TOKEN</code>, <code>TINYBIRD_TRACKER_TOKEN</code>, and <code>TINYBIRD_TRACKER_ENDPOINT</code>. Those values are not set yet, so this page will gather them. Open <a href="https://cloud.tinybird.co" target="_blank" rel="noopener">Tinybird Cloud</a>, create an account or sign in, then open the <strong>Tokens</strong> page and paste your <strong>Workspace admin token</strong> below. Click <strong>Generate</strong>—we will resolve your API URL and tokens, publish Ghost’s analytics schema if needed, then show variables you can copy into your deployment environment.</p>
+  <p class="lede">Your stack needs <code>TINYBIRD_API_URL</code>, <code>TINYBIRD_WORKSPACE_ID</code>, <code>TINYBIRD_ADMIN_TOKEN</code>, and <code>TINYBIRD_TRACKER_TOKEN</code>. Those values are not set yet, so this page will gather them. Open <a href="https://cloud.tinybird.co" target="_blank" rel="noopener">Tinybird Cloud</a>, create an account or sign in, then open the <strong>Tokens</strong> page and paste your <strong>Workspace admin token</strong> below. Click <strong>Generate</strong>—we will resolve your API URL and tokens, publish Ghost’s analytics schema if needed, then show variables you can copy into your deployment environment.</p>
 
   <label for="adminToken">Workspace admin token</label>
   <input type="password" id="adminToken" name="adminToken" autocomplete="off" placeholder="p.eyJ…">
@@ -688,17 +832,73 @@ function wizardPage() {
 </html>`;
 }
 
-app.get('/tinybird_setup', (_req, res) => {
+wizardRouter.get('/tinybird_setup', (_req, res) => {
   res.type('html').send(wizardPage());
 });
 
-app.get('/', (_req, res) => {
-  res.redirect(302, '/tinybird_setup');
-});
+// --- Mount mode ------------------------------------------------------------
+const PROXY_MODE = isTinybirdReady();
+
+if (PROXY_MODE) {
+  // Same-origin analytics: strip `/.ghost/analytics` before forwarding to traffic-analytics:3000.
+  // NOTE: http-proxy-middleware v2 forwards `req.originalUrl` even when mounted under a
+  // prefix via `app.use(prefix, proxy)`, so Express' built-in prefix strip is ignored and
+  // traffic-analytics sees `/.ghost/analytics/api/...` → 404. `pathRewrite` does the strip.
+  app.use(
+    ANALYTICS_PREFIX,
+    createProxyMiddleware({
+      target: ANALYTICS_UPSTREAM,
+      changeOrigin: true,
+      xfwd: true,
+      pathRewrite: { [`^${ANALYTICS_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`]: '' },
+      logLevel: 'warn',
+    })
+  );
+
+  // ActivityPub (federation): forward the path untouched — matches caddy/snippets/ActivityPub.
+  // http-proxy-middleware v2 uses req.originalUrl, so `/.ghost/activitypub/v1/site/` arrives
+  // at activitypub:8080 intact (no pathRewrite needed).
+  const activitypubProxy = createProxyMiddleware({
+    target: ACTIVITYPUB_UPSTREAM,
+    changeOrigin: true,
+    xfwd: true,
+    logLevel: 'warn',
+  });
+  for (const prefix of ACTIVITYPUB_PREFIXES) {
+    app.use(prefix, activitypubProxy);
+  }
+
+  // Everything else proxies to Ghost. Preserve Host so Ghost sees the public URL.
+  app.use(
+    createProxyMiddleware({
+      target: GHOST_UPSTREAM,
+      changeOrigin: false,
+      xfwd: true,
+      ws: true,
+      logLevel: 'warn',
+    })
+  );
+} else {
+  app.use(wizardRouter);
+  app.get('/', (_req, res) => res.redirect(302, '/tinybird_setup'));
+  // Catch-all: until setup is done, every request lands on the wizard.
+  app.use((_req, res) => res.redirect(302, '/tinybird_setup'));
+}
 
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);
+  if (PROXY_MODE) {
+    console.log(
+      `wizard: proxy mode — ${ANALYTICS_PREFIX}/* -> ${ANALYTICS_UPSTREAM} (strip prefix); ` +
+        `${ACTIVITYPUB_PREFIXES.join(', ')} -> ${ACTIVITYPUB_UPSTREAM}; /* -> ${GHOST_UPSTREAM}`
+    );
+  } else {
+    console.log(`Analytics setup required: ${baseUrl}/tinybird_setup`);
+  }
 });
+
+// Kick off MySQL bootstrap in the background so the setup UI is reachable even if the
+// DB is slow to come up. Healthcheck stays unhealthy until this resolves.
+runBootstrapWithRetry();
 
 /** Docker sends SIGTERM on stop; close HTTP server so the process exits before stop_grace_period (avoids SIGKILL / exit 137). */
 function shutdown() {
