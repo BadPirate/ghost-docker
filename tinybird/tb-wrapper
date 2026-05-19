@@ -9,7 +9,7 @@ then
         cp /home/tinybird/.tinyb ./.tinyb
         echo "Copied .tinyb auth file to current directory"
     else
-        echo "No .tinyb auth file found, please run 'docker compose run --rm tinybird-login' first to login"
+        echo "No .tinyb auth file found. Paste auth JSON into the wizard wizard or run: tb login --method code"
         exit 1
     fi
 fi

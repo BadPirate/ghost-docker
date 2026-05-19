@@ -1,8 +1,8 @@
 services:
-  ghost-gate:
+  wizard:
     build:
       context: .
-      dockerfile: ghost-gate/Dockerfile
+      dockerfile: wizard/Dockerfile
       args:
         GHOST_VERSION: ${GHOST_VERSION:-6-alpine}
     depends_on:
@@ -43,7 +43,6 @@ services:
       timeout: 5s
       retries: 24
       start_period: 30s
-
   ghost:
     image: ghost:${GHOST_VERSION:-6-alpine}
     environment:
@@ -63,14 +62,11 @@ services:
       mail__options__port: ${MAIL_OPTIONS_PORT:-465}
       mail__options__service: ${MAIL_OPTIONS_SERVICE:-Mailgun}
       mail__options__host: ${MAIL_OPTIONS_HOST}
-      # Same-origin tracker (no CORS).  ghost-gate strips /.ghost/analytics and forwards
-      # to traffic-analytics:3000/api/v1/page_hit.
       tinybird__tracker__endpoint: ${SERVICE_URL_GHOST_GATE}/.ghost/analytics/api/v1/page_hit
       labs__publicAPI: "true"
       tinybird__adminToken: ${TINYBIRD_ADMIN_TOKEN}
       tinybird__workspaceId: ${TINYBIRD_WORKSPACE_ID}
       tinybird__tracker__datasource: analytics_events
-      # Admin/stats read from Tinybird API directly (not via traffic-analytics).
       tinybird__stats__endpoint: ${TINYBIRD_API_URL:-https://api.tinybird.co}
     volumes:
       - 'ghost-content-data:/var/lib/ghost/content'
@@ -82,9 +78,6 @@ services:
       activitypub:
         condition: service_started
         required: false
-    # Ghost redirects `/` to its public URL, so `wget --spider` follows the redirect
-    # out of the container.  Instead, treat "server answered with any HTTP status line"
-    # as alive (busybox wget prints `HTTP/1.1 …` on stderr with -S even for redirects).
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -93,7 +86,6 @@ services:
       timeout: 5s
       retries: 18
       start_period: 120s
-
   mysql:
     image: mysql:8.0.44@sha256:f37951fc3753a6a22d6c7bf6978c5e5fefcf6f31814d98c582524f98eae52b21
     restart: always
@@ -111,7 +103,6 @@ services:
       start_interval: 5s
       timeout: 20s
       retries: 10
-
   traffic-analytics:
     image: ghost/traffic-analytics:1.0.196@sha256:f93abf4134db41d94d90bb0ef6e4fcc67dfd91162f6ad15423c51e3c49f9c3a7
     restart: always
@@ -124,7 +115,6 @@ services:
       - traffic_analytics_data:/data
     environment:
       NODE_ENV: production
-      # Behind Traefik/Coolify; client IP from X-Forwarded-For (see TryGhost/TrafficAnalytics).
       TRUST_PROXY: "true"
       PROXY_TARGET: ${TINYBIRD_API_URL:-https://api.tinybird.co}/v0/events
       SALT_STORE_TYPE: ${SALT_STORE_TYPE:-file}
@@ -139,7 +129,6 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
-
   activitypub:
     image: ghcr.io/tryghost/activitypub:1.2.2@sha256:128f0d08d872930b4ab37c9fc1fe8042fefd44622316b05f3885bd068be7cc43
     restart: always

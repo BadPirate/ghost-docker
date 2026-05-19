@@ -58,7 +58,7 @@ All configuration is done via environment variables. Key patterns:
 - `.env` - Main environment configuration (create from `.env.example`)
 - `compose.yml` - Docker Compose service definitions
 - `Caddyfile` - Reverse proxy routing configuration
-- `mysql-init/create-multiple-databases.sh` - MySQL multi-database initialization
+- `mysql-init/mysql-app-bootstrap.sh` - App DB grants + password sync (run by `mysql-app-init` sidecar; stock `mysql:8` server image)
 
 ## Migration from Ghost CLI
 

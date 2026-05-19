@@ -1,7 +1,3 @@
----
-# Legacy Ghost 5 Coolify template, kept for migrations from the old built-in Ghost
-# service in Coolify.  No analytics, no ActivityPub, no ghost-gate.  For a new install
-# prefer coolify/docker-compose.6.yml.  See coolify/README.md.
 services:
   ghost:
     image: 'ghost:5'
